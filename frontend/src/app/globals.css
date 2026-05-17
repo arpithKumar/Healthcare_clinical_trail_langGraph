@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --background: #ffffff;
+  --foreground: #0f172a;
+}
+
+.dark {
+  --background: #020617;
+  --foreground: #f1f5f9;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, sans-serif;
+  @apply transition-colors duration-300;
+}
+
+/* Dot grid background pattern */
+.bg-dot-grid {
+  background-image: radial-gradient(circle at 1px 1px, rgb(148 163 184 / 0.25) 1px, transparent 0);
+  background-size: 28px 28px;
+}
+.dark .bg-dot-grid {
+  background-image: radial-gradient(circle at 1px 1px, rgb(51 65 85 / 0.35) 1px, transparent 0);
+  background-size: 28px 28px;
+}
+
+/* Shimmer animation for skeleton loaders */
+@keyframes shimmer {
+  0%   { background-position: -600px 0; }
+  100% { background-position:  600px 0; }
+}
+.shimmer {
+  background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
+  background-size: 600px 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+.dark .shimmer {
+  background: linear-gradient(90deg, #1e293b 25%, #334155 50%, #1e293b 75%);
+  background-size: 600px 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}

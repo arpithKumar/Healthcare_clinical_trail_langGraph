@@ -1,0 +1,4 @@
+.env
+.git
+neo4j_data/
+__pycache__/
