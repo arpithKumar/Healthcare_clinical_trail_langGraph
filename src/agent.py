@@ -8,9 +8,9 @@ from typing_extensions import TypedDict, NotRequired
 from dotenv import load_dotenv
 from neo4j import GraphDatabase, Query
 from typing import cast, LiteralString
-from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, END
+from src.dependencies import get_llm
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -37,12 +37,6 @@ def _get_driver():
     return _neo4j_driver
 
 
-llm = ChatOllama(
-    model="llama3",
-    temperature=0,
-    base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-)
-
 # ── State ─────────────────────────────────────────────────────────────────────
 
 
@@ -55,8 +49,10 @@ class GraphState(TypedDict):
     final_verdict: NotRequired[str]
     error_message: NotRequired[str]
     retry_count: NotRequired[int]
-    phase_filter: NotRequired[str]  # e.g. "PHASE3"
+    phase_filter: NotRequired[str]   # e.g. "PHASE3"
     status_filter: NotRequired[str]  # e.g. "RECRUITING"
+    llm_provider: NotRequired[str | None]  # e.g. "ollama" | "openai" | "anthropic"
+    llm_model: NotRequired[str | None]     # e.g. "llama3" | "gpt-4o" | "claude-opus-4-5"
 
 
 # ── Node 1: Analyze the patient query ────────────────────────────────────────
@@ -85,7 +81,7 @@ def analyze_query(state: GraphState) -> dict:
         ]
     )
 
-    chain = prompt | llm
+    chain = prompt | get_llm(state.get("llm_provider"), state.get("llm_model"))
     result = chain.invoke({"query": state["patient_query"]})
     analyzed = str(result.content).strip()
     logger.info("Analyzed profile: %s", analyzed)
@@ -160,7 +156,7 @@ LIMIT 10""",
         ]
     )
 
-    chain = prompt | llm
+    chain = prompt | get_llm(state.get("llm_provider"), state.get("llm_model"))
     result = chain.invoke(
         {"profile": state.get("analyzed_profile", state["patient_query"])}
     )
@@ -244,7 +240,7 @@ Keep each reason and concern to one concise sentence. Max 3 reasons and 2 concer
         ]
     )
 
-    chain = prompt | llm
+    chain = prompt | get_llm(state.get("llm_provider"), state.get("llm_model"))
     result = chain.invoke(
         {
             "profile": state.get("analyzed_profile", state["patient_query"]),
@@ -316,7 +312,7 @@ def evaluate_results(state: GraphState) -> dict:
         ]
     )
 
-    chain = prompt | llm
+    chain = prompt | get_llm(state.get("llm_provider"), state.get("llm_model"))
     result = chain.invoke(
         {
             "query": state["patient_query"],

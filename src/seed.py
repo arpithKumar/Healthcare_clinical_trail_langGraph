@@ -6,7 +6,7 @@ from src.coding import map_to_icd10
 
 import requests
 
-from src.extract import extract_trial_data
+from src.extract import extract_trial_data, assess_extraction_confidence, CONFIDENCE_THRESHOLD
 from src.graph import GraphManager
 from src.logging_config import setup_logging
 
@@ -71,7 +71,7 @@ class ClinicalTrialsGovSource:
             i.get("name", "")
             for i in interventions
             if i.get("type", "").upper()
-            in ("DRUG", "BIOLOGICAL", "COMBINATION_PRODUCT")
+               in ("DRUG", "BIOLOGICAL", "COMBINATION_PRODUCT")
         ]
         medications_str = (
             ", ".join(filter(None, drug_names)) if drug_names else "Not specified"
@@ -124,12 +124,27 @@ class ClinicalTrialsGovSource:
 def _process_trial(record: TrialRecord, gm: GraphManager) -> tuple[str, bool, str]:
     try:
         extracted_data = extract_trial_data(record.description)
-        # Enrich all conditions with ICD-10 codes before storing in the graph
         for condition in (
-            extracted_data.conditions_treated + extracted_data.conditions_excluded
+                extracted_data.conditions_treated + extracted_data.conditions_excluded
         ):
             condition.icd10_code = map_to_icd10(condition.name)
-        gm.ingest_trial(trial_id=record.trial_id, extracted_data=extracted_data, phase=record.phase, status=record.status)
+
+        confidence = assess_extraction_confidence(record.description, extracted_data)
+        if confidence < CONFIDENCE_THRESHOLD:
+            gm.ingest_pending_review(
+                trial_id=record.trial_id,
+                text=record.description,
+                extracted_json=extracted_data.model_dump_json(),
+                confidence=confidence,
+            )
+            return record.trial_id, True, f"queued_for_review(confidence={confidence:.2f})"
+
+        gm.ingest_trial(
+            trial_id=record.trial_id,
+            extracted_data=extracted_data,
+            phase=record.phase,
+            status=record.status,
+        )
         return record.trial_id, True, "OK"
     except Exception as e:
         return record.trial_id, False, str(e)

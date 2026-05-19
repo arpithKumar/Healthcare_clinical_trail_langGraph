@@ -11,6 +11,9 @@ from src.routers import graph as graph_router
 from src.routers import patients as patients_router
 from src.routers import trials as trials_router
 from src.routers import watchlist as watchlist_router
+from src.routers import search as search_router
+from src.routers import medications as medications_router
+from src.routers import patient_profiles as patient_profiles_router
 from src.scheduler import (
     get_next_run_time,
     start_scheduler,
@@ -43,7 +46,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "DELETE", "PATCH"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -71,3 +74,6 @@ app.include_router(patients_router.router, prefix=_PREFIX)
 app.include_router(graph_router.router, prefix=_PREFIX)
 app.include_router(trials_router.router, prefix=_PREFIX)
 app.include_router(watchlist_router.router, prefix=_PREFIX)
+app.include_router(search_router.router, prefix=_PREFIX)
+app.include_router(medications_router.router, prefix=_PREFIX)
+app.include_router(patient_profiles_router.router, prefix=_PREFIX)

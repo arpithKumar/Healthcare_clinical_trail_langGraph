@@ -157,8 +157,6 @@ export function GraphTab({ trialIds }: Props) {
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
-
-    // queueMicrotask keeps setLoading out of the synchronous effect body
     queueMicrotask(() => {
       if (!cancelled) setLoading(true);
     });

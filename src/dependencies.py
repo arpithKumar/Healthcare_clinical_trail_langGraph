@@ -4,6 +4,7 @@ import os
 
 import redis as redis_lib
 from dotenv import load_dotenv
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama import ChatOllama
 
@@ -75,6 +76,42 @@ def cache_flush() -> None:
         logger.warning("Cache flush failed (%s).", exc)
 
 
+# ── Multi-LLM factory ────────────────────────────────────────────────────────
+
+_llm_cache: dict[tuple[str, str], BaseChatModel] = {}
+
+
+def _create_llm(provider: str, model: str) -> BaseChatModel:
+    """Instantiate an LLM for the given provider + model string."""
+    if provider == "openai":
+        from langchain_openai import ChatOpenAI  # optional dep — lazy import
+        return ChatOpenAI(model=model, temperature=0)
+    if provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic  # optional dep — lazy import
+        return ChatAnthropic(model=model, temperature=0)  # type: ignore[return-value]
+    # Default: Ollama (local)
+    return ChatOllama(
+        model=model,
+        temperature=0,
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+    )
+
+
+def get_llm(provider: str | None = None, model: str | None = None) -> BaseChatModel:
+    """Return a cached LLM instance for the given provider + model.
+
+    Falls back to LLM_PROVIDER / LLM_MODEL env vars, then ollama / llama3.
+    Instances are cached by (provider, model) so repeated calls are cheap.
+    """
+    _provider = (provider or os.getenv("LLM_PROVIDER", "ollama")).lower()
+    _model = model or os.getenv("LLM_MODEL", "llama3")
+    cache_key = (_provider, _model)
+    if cache_key not in _llm_cache:
+        logger.info("Initialising LLM: provider=%s model=%s", _provider, _model)
+        _llm_cache[cache_key] = _create_llm(_provider, _model)
+    return _llm_cache[cache_key]
+
+
 # ── Reverse-match LLM chain ───────────────────────────────────────────────────
 
 _reverse_llm = ChatOllama(
@@ -109,3 +146,4 @@ Describe the ideal patient profile in 2-3 sentences.""",
 )
 
 reverse_chain = _reverse_prompt | _reverse_llm
+eligibility_chain = ChatOllama(model="llama3", temperature=0)

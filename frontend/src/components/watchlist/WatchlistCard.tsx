@@ -1,17 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Trash2, ChevronDown, ChevronUp, Sparkle } from "lucide-react";
-import type {
-  WatchlistProfile,
-  WatchlistRunResult,
-  ScoredTrial,
-} from "@/types";
+import { Trash2, ChevronDown, ChevronUp, Sparkle, Check, Loader2 } from "lucide-react";
+import type { WatchlistProfile, WatchlistRunResult, ScoredTrial } from "@/types";
+import { updateWatchlistNotes } from "@/lib/api";
+import { timeAgo } from "@/lib/utils";
+
+const MAX_NOTES = 500;
 
 interface Props {
   profile: WatchlistProfile;
-  runResult?: WatchlistRunResult; // present after "Run All" is clicked
+  runResult?: WatchlistRunResult;
   onDelete: (id: string) => void;
 }
 
@@ -31,6 +31,15 @@ export function WatchlistCard({ profile, runResult, onDelete }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
+  // Notes state
+  const [notesText, setNotesText] = useState(profile.notes ?? "");
+  const [notesSaving, setNotesSaving] = useState(false);
+  const [notesSaved, setNotesSaved] = useState(false);
+  const [notesUpdatedAt, setNotesUpdatedAt] = useState<string | null>(
+    profile.notes_updated_at ?? null,
+  );
+  const savedNotesRef = useRef(profile.notes ?? "");
+
   const lastCount = profile.last_trial_ids?.length ?? 0;
   const newCount = runResult?.new_matches.length ?? 0;
   const hasTrials = (runResult?.scored_trials.length ?? 0) > 0;
@@ -39,6 +48,23 @@ export function WatchlistCard({ profile, runResult, onDelete }: Props) {
   const handleDelete = async () => {
     setDeleting(true);
     onDelete(profile.id);
+  };
+
+  const handleNotesBlur = async () => {
+    if (notesText === savedNotesRef.current) return;
+    setNotesSaving(true);
+    setNotesSaved(false);
+    try {
+      await updateWatchlistNotes(profile.id, notesText);
+      savedNotesRef.current = notesText;
+      setNotesUpdatedAt(new Date().toISOString());
+      setNotesSaved(true);
+      setTimeout(() => setNotesSaved(false), 2000);
+    } catch {
+      // silent — user can retry by blurring again
+    } finally {
+      setNotesSaving(false);
+    }
   };
 
   return (
@@ -52,12 +78,9 @@ export function WatchlistCard({ profile, runResult, onDelete }: Props) {
       {/* Main row */}
       <div className="p-5">
         <div className="flex items-start justify-between gap-3">
-          {/* Profile text */}
           <p className="text-sm text-slate-700 dark:text-slate-200 leading-snug line-clamp-2 flex-1">
             {profile.profile_text}
           </p>
-
-          {/* Delete button */}
           <button
             onClick={handleDelete}
             disabled={deleting}
@@ -73,20 +96,15 @@ export function WatchlistCard({ profile, runResult, onDelete }: Props) {
           <span className="text-[10px] text-slate-400">
             Saved {formatDate(profile.created_at)}
           </span>
-
-          {/* Previous match count */}
           {lastCount > 0 && !runResult && (
             <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500">
               {lastCount} match{lastCount !== 1 ? "es" : ""}
             </span>
           )}
-
-          {/* Run result badges */}
           {runResult && !hasError && (
             <>
               <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500">
-                {runResult.total_matches} match
-                {runResult.total_matches !== 1 ? "es" : ""}
+                {runResult.total_matches} match{runResult.total_matches !== 1 ? "es" : ""}
               </span>
               {newCount > 0 && (
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-500 border border-amber-400/30 flex items-center gap-1">
@@ -96,8 +114,6 @@ export function WatchlistCard({ profile, runResult, onDelete }: Props) {
               )}
             </>
           )}
-
-          {/* Error badge */}
           {hasError && (
             <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-400 border border-rose-500/20">
               Run failed
@@ -105,23 +121,66 @@ export function WatchlistCard({ profile, runResult, onDelete }: Props) {
           )}
         </div>
 
-        {/* Error detail */}
         {hasError && (
           <p className="mt-2 text-[11px] text-rose-400 bg-rose-500/5 rounded-lg px-3 py-2">
             {runResult?.error}
           </p>
         )}
+
+        {/* ── Clinician notes ─────────────────────────────────────────────── */}
+        <div className="mt-4 space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+              Notes
+            </span>
+            <div className="flex items-center gap-2">
+              {notesSaving && (
+                <span className="flex items-center gap-1 text-[10px] text-slate-400">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Saving…
+                </span>
+              )}
+              <AnimatePresence>
+                {notesSaved && (
+                  <motion.span
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="flex items-center gap-1 text-[10px] text-emerald-500"
+                  >
+                    <Check className="w-3 h-3" />
+                    Saved
+                  </motion.span>
+                )}
+              </AnimatePresence>
+              {notesUpdatedAt && !notesSaving && !notesSaved && (
+                <span className="text-[10px] text-slate-400">
+                  edited {timeAgo(notesUpdatedAt)}
+                </span>
+              )}
+              <span className={`text-[10px] tabular-nums ${notesText.length > MAX_NOTES * 0.9 ? "text-amber-500" : "text-slate-400"}`}>
+                {notesText.length}/{MAX_NOTES}
+              </span>
+            </div>
+          </div>
+          <textarea
+            value={notesText}
+            onChange={(e) => setNotesText(e.target.value.slice(0, MAX_NOTES))}
+            onBlur={handleNotesBlur}
+            rows={3}
+            placeholder="Add clinical observations, eligibility notes, or follow-up actions…"
+            className="w-full resize-none text-xs bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800 rounded-xl px-3 py-2.5 outline-none focus:border-indigo-400 dark:focus:border-indigo-600 focus:ring-4 focus:ring-indigo-500/10 transition-all duration-200 placeholder:text-slate-300 dark:placeholder:text-slate-600"
+          />
+        </div>
       </div>
 
-      {/* Expand toggle — only after a successful run with trials */}
+      {/* Expand toggle */}
       {hasTrials && (
         <button
           onClick={() => setExpanded((p) => !p)}
           className="w-full flex items-center justify-between px-5 py-2.5 border-t border-slate-100 dark:border-slate-800 text-[11px] font-medium text-slate-500 hover:text-indigo-500 transition-colors"
         >
-          <span>
-            {expanded ? "Hide matched trials" : "Show matched trials"}
-          </span>
+          <span>{expanded ? "Hide matched trials" : "Show matched trials"}</span>
           {expanded ? (
             <ChevronUp className="w-3.5 h-3.5" />
           ) : (

@@ -25,8 +25,13 @@ from src.dependencies import (
     graph_manager,
     make_cache_key,
 )
-from src.interactions import get_interaction_texts, warnings_for_trial
-from src.models import BatchMatchResult, FhirBundle, MatchResponse, PatientQuery
+from src.interactions import (
+    get_adverse_reaction_texts,
+    get_interaction_texts,
+    side_effects_for_trial,
+    warnings_for_trial,
+)
+from src.models import BatchMatchResult, FhirBundle, MatchResponse, PatientQuery, MatchHistoryItem
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,18 @@ _NODE_LABELS: dict[str, str] = {
 }
 
 _MEDS_RE = re.compile(r"Medications?:\s*(.+)", re.IGNORECASE)
+_CONDITIONS_RE = re.compile(r"Conditions?:\s*(.+)", re.IGNORECASE)
+
+
+def _extract_patient_conditions(analyzed_profile: str) -> list[str]:
+    """Parse the 'Conditions: ...' line from the LLM-analyzed profile."""
+    m = _CONDITIONS_RE.search(analyzed_profile)
+    if not m:
+        return []
+    cond_str = m.group(1).strip()
+    if cond_str.lower() in ("none", "unknown", "not specified", "n/a", ""):
+        return []
+    return [c.strip().lower() for c in cond_str.split(",") if c.strip()]
 
 
 # ── FHIR parser ───────────────────────────────────────────────────────────────
@@ -75,8 +92,8 @@ def _parse_fhir_bundle(bundle: FhirBundle) -> str:
         r["code"]["text"]
         for r in resources
         if r.get("resourceType") == "Condition"
-        and isinstance(r.get("code"), dict)
-        and r["code"].get("text")
+           and isinstance(r.get("code"), dict)
+           and r["code"].get("text")
     ]
 
     medication_rt = {"MedicationStatement", "MedicationRequest"}
@@ -86,14 +103,11 @@ def _parse_fhir_bundle(bundle: FhirBundle) -> str:
             med = r.get("medicationCodeableConcept", {})
             text = med.get("text") or (med.get("coding") or [{}])[0].get("display")
             if text:
-                medications.append(text)
+                medications.append(str(text))
 
-    parts = [f"{age_str} {gender}"]
-    parts.append(
-        f"with {', '.join(conditions)}"
-        if conditions
-        else "with no specific conditions listed"
-    )
+    parts = [f"{age_str} {gender}", f"with {', '.join(conditions)}"
+    if conditions
+    else "with no specific conditions listed"]
     if medications:
         parts.append(f"currently taking {', '.join(medications)}")
 
@@ -117,27 +131,47 @@ def _extract_patient_meds(analyzed_profile: str) -> list[str]:
 
 
 def _enrich_with_interactions(
-    scored: list[dict], analyzed_profile: str
+        scored: list[dict], analyzed_profile: str
 ) -> tuple[list[dict], list[str]]:
-    """Enrich each scored trial dict with per-trial interaction_warnings.
+    """Enrich each scored trial dict with interaction_warnings and side_effect_flags.
 
-    Also returns a deduplicated flat list of all warnings for MatchResponse.
+    Also returns a deduplicated flat list of all interaction warnings for MatchResponse.
     Never raises — failures are logged and the original scored list is returned unchanged.
     """
     try:
         patient_meds = _extract_patient_meds(analyzed_profile)
-        if not patient_meds or not scored:
+        patient_conditions = _extract_patient_conditions(analyzed_profile)
+        if not scored:
             return scored, []
         trial_ids = [t.get("trial_id", "") for t in scored if t.get("trial_id")]
         if not trial_ids:
             return scored, []
+
         trial_meds_map = graph_manager.get_trial_medications(trial_ids)
-        interaction_texts = get_interaction_texts(patient_meds)
+
+        # Drug interaction check — patient meds vs trial meds (one call per patient med)
+        interaction_texts = get_interaction_texts(patient_meds) if patient_meds else {}
+
+        # Side-effect check — trial med adverse reactions vs patient conditions
+        # (one OpenFDA call per unique trial medication)
+        all_trial_meds: list[str] = list(
+            {m for meds in trial_meds_map.values() for m in meds}
+        )
+        adverse_texts = (
+            get_adverse_reaction_texts(all_trial_meds)
+            if patient_conditions and all_trial_meds
+            else {}
+        )
+
         for trial in scored:
             t_meds = trial_meds_map.get(trial.get("trial_id", ""), [])
             trial["interaction_warnings"] = warnings_for_trial(
                 interaction_texts, t_meds
             )
+            trial["side_effect_flags"] = side_effects_for_trial(
+                adverse_texts, t_meds, patient_conditions
+            )
+
         all_warnings = list(
             {w for t in scored for w in t.get("interaction_warnings", [])}
         )
@@ -151,6 +185,23 @@ def _enrich_with_interactions(
     except Exception as exc:
         logger.warning("Interaction enrichment failed: %s", exc)
         return scored, []
+
+
+def _save_history(result: dict) -> None:
+    """Persist a match run to history. Never raises."""
+    try:
+        scored: list[dict] = result.get("scored_trials") or []
+        db: list[dict] = result.get("trials") or []
+        top: dict | None = scored[0] if scored else (db[0] if db else None)
+        graph_manager.save_match_history(
+            profile=str(result.get("patient_profile") or ""),
+            top_trial_id=top.get("trial_id") if top is not None else None,
+            top_trial_title=top.get("trial_title") if top is not None else None,
+            top_score=top.get("score") if (top is not None and bool(scored)) else None,
+            total_matches=len(scored) if scored else len(db),
+        )
+    except Exception as exc:
+        logger.warning("Failed to save match history: %s", exc)
 
 
 # ── Batch helper ──────────────────────────────────────────────────────────────
@@ -190,14 +241,19 @@ def _run_single_match(row: int, profile: str) -> dict:
 
 @router.post("/patients/match", response_model=MatchResponse, tags=["Agent"])
 def match_patient(
-    query: PatientQuery,
-    response: Response,
-    phase: str | None = QueryParam(None, description="Trial phase filter, e.g. PHASE3"),
-    status: str | None = QueryParam(
-        None, description="Trial status filter, e.g. RECRUITING"
-    ),
+        query: PatientQuery,
+        response: Response,
+        phase: str | None = QueryParam(None, description="Trial phase filter, e.g. PHASE3"),
+        status: str | None = QueryParam(
+            None, description="Trial status filter, e.g. RECRUITING"
+        ),
+        provider: str | None = QueryParam(None, description="LLM provider: ollama|openai|anthropic"),
+        model: str | None = QueryParam(None, description="Model name, e.g. llama3, gpt-4o"),
 ):
-    key = make_cache_key(f"{query.profile}|phase={phase or ''}|status={status or ''}")
+    key = make_cache_key(
+        f"{query.profile}|phase={phase or ''}|status={status or ''}"
+        f"|provider={provider or ''}|model={model or ''}"
+    )
     cached = cache_get(key)
     if cached:
         logger.info("Cache HIT for query: %.60s…", query.profile)
@@ -214,6 +270,10 @@ def match_patient(
             initial_state["phase_filter"] = phase
         if status:
             initial_state["status_filter"] = status
+        if provider:
+            initial_state["llm_provider"] = provider
+        if model:
+            initial_state["llm_model"] = model
         final_state = agent_app.invoke(initial_state)
         scored, all_warnings = _enrich_with_interactions(
             final_state.get("scored_trials", []),
@@ -228,6 +288,7 @@ def match_patient(
             "interaction_warnings": all_warnings,
         }
         cache_set(key, json.dumps(result))
+        _save_history(result)
         return result
     except Exception as e:
         logger.error("Agent execution failed: %s", e)
@@ -266,6 +327,7 @@ def match_patient_fhir(bundle: FhirBundle, response: Response):
             "interaction_warnings": all_warnings,
         }
         cache_set(key, json.dumps(result))
+        _save_history(result)
         return result
     except HTTPException:
         raise
@@ -276,11 +338,13 @@ def match_patient_fhir(bundle: FhirBundle, response: Response):
 
 @router.post("/patients/match/stream", tags=["Agent"])
 async def stream_match_patient(
-    query: PatientQuery,
-    phase: str | None = QueryParam(None, description="Trial phase filter, e.g. PHASE3"),
-    status: str | None = QueryParam(
-        None, description="Trial status filter, e.g. RECRUITING"
-    ),
+        query: PatientQuery,
+        phase: str | None = QueryParam(None, description="Trial phase filter, e.g. PHASE3"),
+        status: str | None = QueryParam(
+            None, description="Trial status filter, e.g. RECRUITING"
+        ),
+        provider: str | None = QueryParam(None, description="LLM provider: ollama|openai|anthropic"),
+        model: str | None = QueryParam(None, description="Model name, e.g. llama3, gpt-4o"),
 ):
     # SSE is stateful — not cached
     async def event_stream():
@@ -290,6 +354,10 @@ async def stream_match_patient(
                 initial_state["phase_filter"] = phase
             if status:
                 initial_state["status_filter"] = status
+            if provider:
+                initial_state["llm_provider"] = provider
+            if model:
+                initial_state["llm_model"] = model
             accumulated: dict = {}
             async for chunk in agent_app.astream(initial_state):
                 for node_name, node_output in chunk.items():
@@ -303,7 +371,7 @@ async def stream_match_patient(
                     status_val = (
                         "error"
                         if node_name == "execute_query"
-                        and accumulated.get("error_message")
+                           and accumulated.get("error_message")
                         else "complete"
                     )
                     yield f"data: {json.dumps({'type': 'progress', 'node': node_name, 'label': label, 'status': status_val})}\n\n"
@@ -314,7 +382,16 @@ async def stream_match_patient(
                 accumulated.get("scored_trials", []),
                 accumulated.get("analyzed_profile", ""),
             )
-            yield f"data: {json.dumps({'type': 'result', 'data': {'patient_profile': query.profile, 'executed_cypher': accumulated.get('cypher_query'), 'agent_verdict': accumulated.get('final_verdict'), 'trials': accumulated.get('db_results', []), 'scored_trials': scored, 'interaction_warnings': all_warnings}})}\n\n"
+            result_data = {
+                "patient_profile": query.profile,
+                "executed_cypher": accumulated.get("cypher_query"),
+                "agent_verdict": accumulated.get("final_verdict"),
+                "trials": accumulated.get("db_results", []),
+                "scored_trials": scored,
+                "interaction_warnings": all_warnings,
+            }
+            yield f"data: {json.dumps({'type': 'result', 'data': result_data})}\n\n"
+            await asyncio.to_thread(_save_history, result_data)
         except Exception as e:
             logger.error("SSE stream error: %s", e)
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -395,3 +472,15 @@ def match_patients_batch(file: UploadFile = File(...)):
     ordered = [results_map[i] for i in range(len(rows))]
     logger.info("Batch match complete: %d results.", len(ordered))
     return ordered
+
+
+@router.get("/history", response_model=list[MatchHistoryItem], tags=["Agent"])
+def get_match_history(
+        limit: int = QueryParam(default=20, ge=1, le=100),
+):
+    """Return recent match history records, newest first."""
+    try:
+        return graph_manager.list_match_history(limit=limit)
+    except Exception as e:
+        logger.error("History fetch failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))

@@ -101,3 +101,7 @@ class ScoredTrial(BaseModel):
     concerns: List[str] = Field(
         default_factory=list, description="Potential exclusions or caveats."
     )
+    side_effect_flags: List[str] = Field(
+        default_factory=list,
+        description="Patient conditions that appear as adverse reaction risks for trial medications.",
+    )

@@ -2,6 +2,7 @@ import uuid
 
 from pydantic import BaseModel, Field
 
+
 # ── Requests ──────────────────────────────────────────────────────────────────
 
 
@@ -23,6 +24,10 @@ class IngestionRequest(BaseModel):
 
 class SaveProfileRequest(BaseModel):
     profile_text: str = Field(..., examples=["55yo male with Type 2 Diabetes."])
+
+
+class UpdateNotesRequest(BaseModel):
+    notes: str = Field(default="")
 
 
 # ── Responses ─────────────────────────────────────────────────────────────────
@@ -70,6 +75,8 @@ class WatchlistProfileResponse(BaseModel):
     profile_text: str
     created_at: str
     last_trial_ids: list[str]
+    notes: str | None = Field(default=None)
+    notes_updated_at: str | None = Field(default=None)
 
 
 class WatchlistRunItemResponse(BaseModel):
@@ -96,3 +103,158 @@ class BatchMatchResult(BaseModel):
     top_trial_title: str | None
     top_score: int | None
     error: str | None
+
+
+class TrialSearchResult(BaseModel):
+    trial_id: str
+    title: str
+    phase: str | None
+    status: str | None
+    conditions: list[str]
+    condition_count: int
+
+
+class TrialSearchResponse(BaseModel):
+    trials: list[TrialSearchResult]
+    total: int
+    page: int
+    limit: int
+    pages: int
+
+
+class TrialCondition(BaseModel):
+    name: str
+    icd10_code: str | None = Field(default=None)
+
+
+class TrialDetail(BaseModel):
+    trial_id: str
+    title: str
+    phase: str | None
+    status: str | None
+    min_age: int | None
+    max_age: int | None
+    conditions_treated: list[TrialCondition]
+    medications_used: list[str]
+    conditions_excluded: list[TrialCondition]
+    medications_excluded: list[str]
+
+
+class MatchHistoryItem(BaseModel):
+    id: str
+    profile: str
+    top_trial_id: str | None
+    top_trial_title: str | None
+    top_score: int | None
+    total_matches: int
+    created_at: str
+
+
+class ConditionStat(BaseModel):
+    name: str
+    icd10_code: str | None = Field(default=None)
+    trial_count: int
+
+
+class DistributionItem(BaseModel):
+    label: str
+    count: int
+
+
+class GraphStats(BaseModel):
+    trial_count: int
+    condition_count: int
+    medication_count: int
+    top_conditions: list[ConditionStat]
+    phase_distribution: list[DistributionItem]
+    status_distribution: list[DistributionItem]
+
+
+class SimilarTrial(BaseModel):
+    trial_id: str
+    title: str
+    shared_conditions: list[str]
+    shared_medications: list[str]
+    overlap_count: int
+
+
+class MedicationTrialSummary(BaseModel):
+    trial_id: str
+    title: str
+    phase: str | None = Field(default=None)
+    status: str | None = Field(default=None)
+
+
+class MedicationDetailResponse(BaseModel):
+    name: str
+    trials: list[MedicationTrialSummary]
+    conditions: list[str]
+    interaction_text: str | None = Field(default=None)
+
+
+class EligibilityCriterion(BaseModel):
+    criterion: str
+    verdict: str  # "pass" | "fail" | "unknown"
+    reason: str
+
+
+class EligibilityRequest(BaseModel):
+    profile: str
+
+
+class EligibilityResponse(BaseModel):
+    trial_id: str
+    criteria: list[EligibilityCriterion]
+
+
+class PatientProfileCreate(BaseModel):
+    name: str = Field(..., examples=["John D."])
+    age: int | None = Field(default=None, ge=0, le=150)
+    gender: str | None = Field(default=None)
+    conditions: list[str] = Field(default_factory=list)
+    medications: list[str] = Field(default_factory=list)
+    notes: str | None = Field(default=None)
+
+
+class PatientProfileUpdate(BaseModel):
+    name: str | None = Field(default=None)
+    age: int | None = Field(default=None, ge=0, le=150)
+    gender: str | None = Field(default=None)
+    conditions: list[str] | None = Field(default=None)
+    medications: list[str] | None = Field(default=None)
+    notes: str | None = Field(default=None)
+
+
+class PatientProfileResponse(BaseModel):
+    id: str
+    name: str
+    age: int | None = Field(default=None)
+    gender: str | None = Field(default=None)
+    conditions: list[str] = Field(default_factory=list)
+    medications: list[str] = Field(default_factory=list)
+    notes: str | None = Field(default=None)
+    created_at: str
+    updated_at: str
+
+
+class QualityIssue(BaseModel):
+    type: str
+    label: str
+    count: int
+    items: list[str] = Field(default_factory=list)
+
+
+class GraphQualityResponse(BaseModel):
+    health_score: int = Field(ge=0, le=100)
+    total_trials: int
+    pending_reviews: int
+    issues: list[QualityIssue]
+
+
+class PendingReviewItem(BaseModel):
+    id: str
+    trial_id: str
+    trial_title: str
+    confidence: float
+    created_at: str
+    extracted_json: str

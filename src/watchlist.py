@@ -26,7 +26,7 @@ class WatchlistManager:
     def save_profile(self, profile_text: str) -> dict:
         """Persist a new patient profile and return its record."""
         pid = str(uuid.uuid4())
-        created_at = datetime.datetime.utcnow().isoformat()
+        created_at = datetime.datetime.now(datetime.UTC).isoformat()
         with self.driver.session() as session:
             session.run(
                 """
@@ -54,10 +54,12 @@ class WatchlistManager:
         with self.driver.session() as session:
             result = session.run("""
                 MATCH (p:SavedProfile)
-                RETURN p.id            AS id,
-                       p.profile_text  AS profile_text,
-                       p.created_at    AS created_at,
-                       p.last_trial_ids AS last_trial_ids
+                RETURN p.id               AS id,
+                       p.profile_text     AS profile_text,
+                       p.created_at       AS created_at,
+                       p.last_trial_ids   AS last_trial_ids,
+                       p.notes            AS notes,
+                       p.notes_updated_at AS notes_updated_at
                 ORDER BY p.created_at DESC
                 """)
             return [dict(r) for r in result]
@@ -78,6 +80,30 @@ class WatchlistManager:
                 id=profile_id,
             )
         logger.info("Deleted watchlist profile %s.", profile_id)
+        return True
+
+    def update_notes(self, profile_id: str, notes: str) -> bool:
+        """Update the notes field for a profile. Returns False if not found."""
+        import datetime as _dt
+        with self.driver.session() as session:
+            check = session.run(
+                "MATCH (p:SavedProfile {id: $id}) RETURN count(p) AS c",
+                id=profile_id,
+            )
+            record = check.single(strict=True)
+            if record["c"] == 0:
+                return False
+            session.run(
+                """
+                MATCH (p:SavedProfile {id: $id})
+                SET p.notes            = $notes,
+                    p.notes_updated_at = $updated_at
+                """,
+                id=profile_id,
+                notes=notes,
+                updated_at=_dt.datetime.now(datetime.UTC).isoformat(),
+            )
+        logger.info("Updated notes for profile %s.", profile_id)
         return True
 
     # ── Monitoring run ────────────────────────────────────────────────────────

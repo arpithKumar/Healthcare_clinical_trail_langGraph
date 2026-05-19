@@ -1,6 +1,5 @@
 import logging
-import os
-from typing import cast
+import os, re
 
 from dotenv import load_dotenv
 from langchain_ollama import ChatOllama
@@ -13,7 +12,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 llm = ChatOllama(
-    model="llama3",
+    model=os.getenv("LLM_MODEL", "llama3"),
     temperature=0,
     base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
 )
@@ -47,14 +46,43 @@ extraction_chain = prompt | structured_llm
 def extract_trial_data(text: str) -> ExtractedEntities:
     """Passes raw clinical trial text to Llama 3 for structured extraction."""
     logger.info("Extracting entities via Llama 3...")
-    result = extraction_chain.invoke({"text": text})
+    res = extraction_chain.invoke({"text": text})
 
-    if not isinstance(result, ExtractedEntities):
+    if not isinstance(res, ExtractedEntities):
         raise ValueError(
-            f"LLM returned unexpected type: {type(result)}. Expected ExtractedEntities."
+            f"LLM returned unexpected type: {type(res)}. Expected ExtractedEntities."
         )
+    return res
 
-    return cast(ExtractedEntities, result)
+
+CONFIDENCE_THRESHOLD = 0.6
+
+
+def assess_extraction_confidence(text: str, entities: ExtractedEntities) -> float:
+    """Ask the LLM to self-score the quality of its extraction (0.0 – 1.0).
+    Falls back to 1.0 on any failure so ingestion is never blocked by this step.
+    """
+    prompt_text = (
+        "You extracted the following entities from a clinical trial description.\n\n"
+        f"Trial title: {entities.trial_title}\n"
+        f"Conditions treated: {[c.name for c in entities.conditions_treated]}\n"
+        f"Medications used: {[m.name for m in entities.medications_used]}\n"
+        f"Conditions excluded: {[c.name for c in entities.conditions_excluded]}\n"
+        f"Medications excluded: {[m.name for m in entities.medications_excluded]}\n\n"
+        "Original text (first 800 characters):\n"
+        f"{text[:800]}\n\n"
+        "On a scale of 0.0 to 1.0, how accurate and complete is this extraction?\n"
+        "Return ONLY a decimal number between 0.0 and 1.0, e.g. 0.85. No other text."
+    )
+    try:
+        response = llm.invoke(prompt_text)
+        raw = response.content if hasattr(response, "content") else str(response)
+        match = re.search(r"\b(0\.\d+|1\.0+|0|1)\b", str(raw))
+        if match:
+            return max(0.0, min(1.0, float(match.group())))
+    except Exception as e:
+        logger.warning("Confidence assessment failed: %s — defaulting to 1.0", e)
+    return 1.0
 
 
 if __name__ == "__main__":

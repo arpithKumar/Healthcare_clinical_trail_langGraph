@@ -6,6 +6,7 @@ from src.agent import app as agent_app
 from src.dependencies import watchlist_manager
 from src.models import (
     SaveProfileRequest,
+    UpdateNotesRequest,
     WatchlistProfileResponse,
     WatchlistRunItemResponse,
 )
@@ -50,6 +51,23 @@ def delete_watchlist_profile(profile_id: str):
         raise
     except Exception as e:
         logger.error("Failed to delete watchlist profile: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/watchlist/{profile_id}/notes", tags=["Watchlist"])
+def update_profile_notes(profile_id: str, request: UpdateNotesRequest):
+    """Save clinician notes for a watchlist profile."""
+    try:
+        found = watchlist_manager.update_notes(profile_id, request.notes)
+        if not found:
+            raise HTTPException(
+                status_code=404, detail=f"Profile {profile_id} not found."
+            )
+        return {"updated": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to update notes for %s: %s", profile_id, e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
