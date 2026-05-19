@@ -27,6 +27,11 @@ _STUB_MODULES = [
     "langchain_core.prompts",
     "langchain_core.output_parsers",
     "langchain_core.messages",
+    # BaseChatModel lives here — must be stubbed as a submodule so that
+    # `from langchain_core.language_models.chat_models import BaseChatModel`
+    # resolves correctly (Python raises "not a package" without these stubs).
+    "langchain_core.language_models",
+    "langchain_core.language_models.chat_models",
     "langchain",
     "langchain.prompts",
     # LangGraph

@@ -2,9 +2,11 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 # Patch heavy dependencies before importing the app
+# Note: src.agent.ChatOllama was removed in Feature P (Multi-LLM Support).
+# The agent now calls get_llm() from src.dependencies — patch there instead.
 with patch("src.graph.GraphDatabase.driver"), patch("src.agent._get_driver"), patch(
-    "src.agent.ChatOllama"
-), patch("src.extract.ChatOllama"), patch("src.dependencies.ChatOllama"):
+    "src.extract.ChatOllama"
+), patch("src.dependencies.ChatOllama"):
     from src.api import app
 
 client = TestClient(app)

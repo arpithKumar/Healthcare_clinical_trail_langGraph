@@ -97,7 +97,11 @@ class TestProcessTrial:
         mock_extracted.conditions_treated = []
         mock_extracted.conditions_excluded = []
 
-        with patch("src.seed.extract_trial_data", return_value=mock_extracted):
+        # Feature O added assess_extraction_confidence to _process_trial.
+        # Return 1.0 (above threshold) so the trial routes to ingest, not pending review.
+        with patch("src.seed.extract_trial_data", return_value=mock_extracted), patch(
+            "src.seed.assess_extraction_confidence", return_value=1.0
+        ):
             trial_id, success, message = _process_trial(record, mock_gm)
 
         assert trial_id == "NCT001"

@@ -1,9 +1,11 @@
 from unittest.mock import patch, MagicMock
 
 # Suppress heavy dependencies during import
+# Note: src.agent.ChatOllama was removed in Feature P (Multi-LLM Support).
+# The agent now calls get_llm() from src.dependencies — patch there instead.
 with patch("src.graph.GraphDatabase.driver"), patch("src.agent._get_driver"), patch(
-    "src.agent.ChatOllama"
-), patch("src.extract.ChatOllama"), patch("src.dependencies.ChatOllama"):
+    "src.extract.ChatOllama"
+), patch("src.dependencies.ChatOllama"):
     from src.interactions import (
         _get_interaction_text,
         warnings_for_trial,

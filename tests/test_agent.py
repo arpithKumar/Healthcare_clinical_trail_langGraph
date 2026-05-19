@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 from src.agent import should_retry, GraphState, MAX_RETRIES
 
@@ -42,29 +43,31 @@ class TestShouldRetry:
 
 class TestAnalyzeQueryNode:
     def test_returns_analyzed_profile_and_retry_count(self):
-        with patch("src.agent.llm") as mock_llm:
-            mock_llm.return_value = MagicMock()
+        # Feature P: agent.py no longer has a module-level `llm`. All nodes call
+        # get_llm(provider, model) from src.dependencies — patch that instead.
+        mock_response = MagicMock()
+        mock_response.content = (
+            "Age: 55\nGender: Male\nConditions: type 2 diabetes\nMedications: none"
+        )
+        mock_llm_instance = MagicMock()
 
-            mock_response = MagicMock()
-            mock_response.content = (
-                "Age: 55\nGender: Male\nConditions: type 2 diabetes\nMedications: none"
+        with patch("src.agent.get_llm", return_value=mock_llm_instance), patch(
+            "src.agent.ChatPromptTemplate"
+        ) as mock_prompt:
+            mock_chain = MagicMock()
+            mock_chain.invoke.return_value = mock_response
+            mock_prompt.from_messages.return_value.__or__ = MagicMock(
+                return_value=mock_chain
             )
 
-            with patch("src.agent.ChatPromptTemplate") as mock_prompt:
-                mock_chain = MagicMock()
-                mock_chain.invoke.return_value = mock_response
-                mock_prompt.from_messages.return_value.__or__ = MagicMock(
-                    return_value=mock_chain
-                )
+            from src.agent import analyze_query
 
-                from src.agent import analyze_query
+            state: GraphState = {"patient_query": "55yo male with Type 2 Diabetes"}
+            result = analyze_query(state)
 
-                state: GraphState = {"patient_query": "55yo male with Type 2 Diabetes"}
-                result = analyze_query(state)
-
-                assert "analyzed_profile" in result
-                assert "retry_count" in result
-                assert result["retry_count"] == 0
+            assert "analyzed_profile" in result
+            assert "retry_count" in result
+            assert result["retry_count"] == 0
 
 
 class TestExecuteQueryNode:
@@ -220,3 +223,169 @@ class TestGenerateCypherFilters:
         system_msg = mock_prompt_cls.from_messages.call_args[0][0][0][1]
         assert "PREVIOUS ATTEMPT FAILED" in system_msg
         assert "SyntaxError: invalid Cypher" in system_msg
+
+
+# ── Node 4: score_matches ─────────────────────────────────────────────────────
+
+
+class TestScoreMatchesNode:
+    """Tests for the score_matches node, focusing on its three-tier JSON fallback."""
+
+    def _make_chain_mock(self, content: str) -> MagicMock:
+        mock_chain = MagicMock()
+        mock_chain.invoke.return_value = MagicMock(content=content)
+        return mock_chain
+
+    def test_returns_empty_list_when_no_db_results(self):
+        from src.agent import score_matches
+
+        state: GraphState = {"patient_query": "55yo male", "db_results": []}
+        result = score_matches(state)
+        assert result["scored_trials"] == []
+
+    def test_parses_clean_json_array_from_llm(self):
+        llm_output = json.dumps(
+            [
+                {
+                    "trial_id": "NCT001",
+                    "trial_title": "Test Trial",
+                    "score": 85,
+                    "reasons": ["Condition match"],
+                    "concerns": [],
+                }
+            ]
+        )
+        with patch("src.agent.get_llm"), patch(
+            "src.agent.ChatPromptTemplate"
+        ) as mock_pt:
+            mock_pt.from_messages.return_value.__or__ = MagicMock(
+                return_value=self._make_chain_mock(llm_output)
+            )
+            from src.agent import score_matches
+
+            state: GraphState = {
+                "patient_query": "55yo male",
+                "db_results": [{"trial_id": "NCT001", "trial_title": "Test Trial"}],
+            }
+            result = score_matches(state)
+
+        assert len(result["scored_trials"]) == 1
+        assert result["scored_trials"][0]["score"] == 85
+        assert result["scored_trials"][0]["reasons"] == ["Condition match"]
+
+    def test_regex_fallback_extracts_json_from_surrounding_prose(self):
+        """LLM wraps the array in explanation text — regex should extract it."""
+        inner = json.dumps(
+            [{"trial_id": "NCT001", "trial_title": "T", "score": 72, "reasons": [], "concerns": []}]
+        )
+        llm_output = f"Here is my assessment:\n{inner}\nI hope that helps."
+        with patch("src.agent.get_llm"), patch(
+            "src.agent.ChatPromptTemplate"
+        ) as mock_pt:
+            mock_pt.from_messages.return_value.__or__ = MagicMock(
+                return_value=self._make_chain_mock(llm_output)
+            )
+            from src.agent import score_matches
+
+            state: GraphState = {
+                "patient_query": "55yo male",
+                "db_results": [{"trial_id": "NCT001", "trial_title": "T"}],
+            }
+            result = score_matches(state)
+
+        assert len(result["scored_trials"]) == 1
+        assert result["scored_trials"][0]["score"] == 72
+
+    def test_falls_back_to_score_50_when_completely_unparseable(self):
+        """Both JSON parse and regex fail — every trial gets score=50."""
+        with patch("src.agent.get_llm"), patch(
+            "src.agent.ChatPromptTemplate"
+        ) as mock_pt:
+            mock_pt.from_messages.return_value.__or__ = MagicMock(
+                return_value=self._make_chain_mock("I cannot produce JSON right now.")
+            )
+            from src.agent import score_matches
+
+            state: GraphState = {
+                "patient_query": "55yo male",
+                "db_results": [
+                    {"trial_id": "NCT001", "trial_title": "Trial One"},
+                    {"trial_id": "NCT002", "trial_title": "Trial Two"},
+                ],
+            }
+            result = score_matches(state)
+
+        assert len(result["scored_trials"]) == 2
+        for trial in result["scored_trials"]:
+            assert trial["score"] == 50
+            assert trial["reasons"] == ["Matched by graph query"]
+            assert trial["concerns"] == []
+
+    def test_fallback_preserves_trial_id_and_title_from_db_results(self):
+        with patch("src.agent.get_llm"), patch(
+            "src.agent.ChatPromptTemplate"
+        ) as mock_pt:
+            mock_pt.from_messages.return_value.__or__ = MagicMock(
+                return_value=self._make_chain_mock("not json at all")
+            )
+            from src.agent import score_matches
+
+            state: GraphState = {
+                "patient_query": "55yo male",
+                "db_results": [{"trial_id": "NCT999", "trial_title": "Important Trial"}],
+            }
+            result = score_matches(state)
+
+        assert result["scored_trials"][0]["trial_id"] == "NCT999"
+        assert result["scored_trials"][0]["trial_title"] == "Important Trial"
+
+    def test_results_sorted_by_score_descending(self):
+        llm_output = json.dumps(
+            [
+                {"trial_id": "NCT001", "score": 45, "reasons": [], "concerns": []},
+                {"trial_id": "NCT002", "score": 90, "reasons": [], "concerns": []},
+                {"trial_id": "NCT003", "score": 65, "reasons": [], "concerns": []},
+            ]
+        )
+        with patch("src.agent.get_llm"), patch(
+            "src.agent.ChatPromptTemplate"
+        ) as mock_pt:
+            mock_pt.from_messages.return_value.__or__ = MagicMock(
+                return_value=self._make_chain_mock(llm_output)
+            )
+            from src.agent import score_matches
+
+            state: GraphState = {
+                "patient_query": "55yo male",
+                "db_results": [
+                    {"trial_id": "NCT001"},
+                    {"trial_id": "NCT002"},
+                    {"trial_id": "NCT003"},
+                ],
+            }
+            result = score_matches(state)
+
+        scores = [t["score"] for t in result["scored_trials"]]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_markdown_fenced_json_is_handled_by_regex_fallback(self):
+        """LLM wraps output in ```json ... ``` — regex should still extract the array."""
+        inner = json.dumps(
+            [{"trial_id": "NCT001", "score": 78, "reasons": ["Good match"], "concerns": []}]
+        )
+        llm_output = f"```json\n{inner}\n```"
+        with patch("src.agent.get_llm"), patch(
+            "src.agent.ChatPromptTemplate"
+        ) as mock_pt:
+            mock_pt.from_messages.return_value.__or__ = MagicMock(
+                return_value=self._make_chain_mock(llm_output)
+            )
+            from src.agent import score_matches
+
+            state: GraphState = {
+                "patient_query": "55yo male",
+                "db_results": [{"trial_id": "NCT001"}],
+            }
+            result = score_matches(state)
+
+        assert result["scored_trials"][0]["score"] == 78
